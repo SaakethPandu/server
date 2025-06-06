@@ -1,79 +1,45 @@
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
-from datetime import datetime
+import os
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your_secret_key_here'
 socketio = SocketIO(app, cors_allowed_origins="*")
+connected_users = {}  # key = socket id, value = username
 
-connected_users = {}  # sid -> username
-chat_history = []     # store last 100 messages
-MAX_HISTORY = 100
-
-def add_message(username, message, private=False, to_user=None):
-    timestamp = datetime.now().strftime("%H:%M")
-    entry = {
-        "username": username,
-        "message": message,
-        "timestamp": timestamp,
-        "private": private,
-        "to_user": to_user
-    }
-    chat_history.append(entry)
-    if len(chat_history) > MAX_HISTORY:
-        chat_history.pop(0)
-    return entry
-
-@app.route('/')
-def home():
-    return "Chat Server is running."
+@app.route("/")
+def index():
+    return "✅ Chat Server is Running!"
 
 @socketio.on('connect')
 def handle_connect():
-    print(f"Client connected: {request.sid}")
-    emit('request_username')
-
-@socketio.on('set_username')
-def handle_set_username(data):
-    username = data.get('username')
-    if not username:
-        return
-    connected_users[request.sid] = username
-    print(f"Username set: {username} (SID: {request.sid})")
-    emit('chat_history', chat_history)
-    emit('user_joined', {"username": username}, broadcast=True)
-    emit('online_users', list(connected_users.values()), broadcast=True)
+    print("Client connected.")
 
 @socketio.on('disconnect')
 def handle_disconnect():
     sid = request.sid
-    username = connected_users.pop(sid, None)
-    if username:
-        print(f"User disconnected: {username} (SID: {sid})")
-        emit('user_left', {"username": username}, broadcast=True)
-        emit('online_users', list(connected_users.values()), broadcast=True)
+    if sid in connected_users:
+        username = connected_users[sid]
+        print(f"{username} disconnected.")
+        emit('user_left', {'username': username}, broadcast=True)
+        del connected_users[sid]
+        send_online_users()
 
-@socketio.on('send_message')
+@socketio.on('join')
+def handle_join(data):
+    username = data['username']
+    connected_users[request.sid] = username
+    print(f"{username} joined.")
+    emit('user_joined', {'username': username}, broadcast=True)
+    send_online_users()
+
+@socketio.on('message')
 def handle_message(data):
-    username = connected_users.get(request.sid, "Anonymous")
-    message = data.get("message", "")
-    to_user = data.get("to_user")
+    emit('message', data, broadcast=True)
 
-    if to_user and to_user != username:
-        # Private message
-        recipient_sid = None
-        for sid, user in connected_users.items():
-            if user == to_user:
-                recipient_sid = sid
-                break
-        if recipient_sid:
-            msg_data = add_message(username, message, private=True, to_user=to_user)
-            emit('receive_message', msg_data, room=recipient_sid)
-            emit('receive_message', msg_data, room=request.sid)
-    else:
-        # Broadcast message
-        msg_data = add_message(username, message)
-        emit('receive_message', msg_data, broadcast=True)
+def send_online_users():
+    user_list = list(connected_users.values())
+    emit('online_users', user_list, broadcast=True)
 
-if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000)
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))  # for Render or localhost
+    socketio.run(app, host="0.0.0.0", port=port)
