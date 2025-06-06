@@ -1,189 +1,103 @@
-import sys
-import threading
-import requests
-import socketio
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QTextEdit, QListWidget,
-    QMessageBox
-)
-from PyQt5.QtCore import Qt
+from flask import Flask, request, jsonify
+from flask_socketio import SocketIO, emit
+import sqlite3
+import os
+import datetime
 
-SERVER_URL = "http://localhost:5000"  # Change to your server URL
-SOCKET_IO_URL = SERVER_URL
+app = Flask(__name__)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-sio = socketio.Client()
+# --- Database Setup ---
+conn = sqlite3.connect('users.db', check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        username TEXT PRIMARY KEY,
+        password TEXT
+    )
+''')
+conn.commit()
 
+connected_users = {}  # sid -> username
+CHAT_LOG_FILE = "chat_log.txt"
 
-class LoginWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Chat Login / Register")
+# --- HTTP Routes for Register/Login ---
 
-        self.layout = QVBoxLayout()
+@app.route("/register", methods=["POST"])
+def register():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+    if not username or not password:
+        return jsonify({"success": False, "message": "Missing username or password"}), 400
 
-        self.username_label = QLabel("Username:")
-        self.username_edit = QLineEdit()
+    cursor.execute("SELECT * FROM users WHERE username=?", (username,))
+    if cursor.fetchone():
+        return jsonify({"success": False, "message": "Username already exists"}), 409
 
-        self.password_label = QLabel("Password:")
-        self.password_edit = QLineEdit()
-        self.password_edit.setEchoMode(QLineEdit.Password)
+    cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, password))
+    conn.commit()
+    return jsonify({"success": True, "message": "Registration successful"})
 
-        self.login_btn = QPushButton("Login")
-        self.register_btn = QPushButton("Register")
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.json
+    username = data.get("username")
+    password = data.get("password")
+    cursor.execute("SELECT * FROM users WHERE username=? AND password=?", (username, password))
+    if cursor.fetchone():
+        return jsonify({"success": True, "message": "Login successful"})
+    else:
+        return jsonify({"success": False, "message": "Invalid username or password"}), 401
 
-        self.layout.addWidget(self.username_label)
-        self.layout.addWidget(self.username_edit)
-        self.layout.addWidget(self.password_label)
-        self.layout.addWidget(self.password_edit)
+@app.route("/")
+def index():
+    return "Chat server with auth is running!"
 
-        btn_layout = QHBoxLayout()
-        btn_layout.addWidget(self.login_btn)
-        btn_layout.addWidget(self.register_btn)
-        self.layout.addLayout(btn_layout)
+# --- Socket.IO Events ---
 
-        self.setLayout(self.layout)
+@socketio.on("connect")
+def on_connect():
+    print("Client connected.")
 
-        self.login_btn.clicked.connect(self.login)
-        self.register_btn.clicked.connect(self.register)
+@socketio.on("disconnect")
+def on_disconnect():
+    sid = request.sid
+    if sid in connected_users:
+        username = connected_users[sid]
+        print(f"{username} disconnected.")
+        emit("user_left", {"username": username}, broadcast=True)
+        del connected_users[sid]
+        send_online_users()
 
-    def login(self):
-        username = self.username_edit.text().strip()
-        password = self.password_edit.text().strip()
-        if not username or not password:
-            QMessageBox.warning(self, "Error", "Please enter username and password")
-            return
-        try:
-            resp = requests.post(f"{SERVER_URL}/login", json={"username": username, "password": password})
-            if resp.status_code == 200 and resp.json().get("success"):
-                self.open_chat(username)
-            else:
-                QMessageBox.warning(self, "Login Failed", resp.json().get("message", "Unknown error"))
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not connect to server: {e}")
+@socketio.on("join")
+def on_join(data):
+    username = data.get("username")
+    if not username:
+        return  # ignore if no username
 
-    def register(self):
-        username = self.username_edit.text().strip()
-        password = self.password_edit.text().strip()
-        if not username or not password:
-            QMessageBox.warning(self, "Error", "Please enter username and password")
-            return
-        try:
-            resp = requests.post(f"{SERVER_URL}/register", json={"username": username, "password": password})
-            if resp.status_code == 200 and resp.json().get("success"):
-                QMessageBox.information(self, "Success", "Registration successful! You can now login.")
-            else:
-                QMessageBox.warning(self, "Register Failed", resp.json().get("message", "Unknown error"))
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Could not connect to server: {e}")
+    connected_users[request.sid] = username
+    print(f"{username} joined.")
+    emit("user_joined", {"username": username}, broadcast=True)
+    send_online_users()
 
-    def open_chat(self, username):
-        self.chat_window = ChatWindow(username)
-        self.chat_window.show()
-        self.close()
+@socketio.on("message")
+def on_message(data):
+    username = data.get("username")
+    message = data.get("message")
+    if username and message:
+        log_chat(username, message)
+        emit("message", data, broadcast=True)
 
+def send_online_users():
+    user_list = list(connected_users.values())
+    emit("online_users", user_list, broadcast=True)
 
-class ChatWindow(QWidget):
-    def __init__(self, username):
-        super().__init__()
-        self.setWindowTitle(f"Chat - {username}")
-        self.username = username
-
-        self.resize(600, 400)
-        layout = QVBoxLayout()
-
-        self.chat_display = QTextEdit()
-        self.chat_display.setReadOnly(True)
-
-        self.online_users_label = QLabel("Online Users:")
-        self.online_users_list = QListWidget()
-        self.online_users_list.setMaximumWidth(150)
-
-        self.message_edit = QLineEdit()
-        self.message_edit.setPlaceholderText("Type your message here...")
-        self.send_btn = QPushButton("Send")
-
-        bottom_layout = QHBoxLayout()
-        bottom_layout.addWidget(self.message_edit)
-        bottom_layout.addWidget(self.send_btn)
-
-        main_layout = QHBoxLayout()
-        left_layout = QVBoxLayout()
-        left_layout.addWidget(self.chat_display)
-        left_layout.addLayout(bottom_layout)
-
-        right_layout = QVBoxLayout()
-        right_layout.addWidget(self.online_users_label)
-        right_layout.addWidget(self.online_users_list)
-
-        main_layout.addLayout(left_layout, stretch=4)
-        main_layout.addLayout(right_layout, stretch=1)
-
-        layout.addLayout(main_layout)
-        self.setLayout(layout)
-
-        self.send_btn.clicked.connect(self.send_message)
-        self.message_edit.returnPressed.connect(self.send_message)
-
-        self.setup_socket()
-
-    def setup_socket(self):
-        # Connect socketio in a background thread
-        threading.Thread(target=self.connect_socket).start()
-
-    def connect_socket(self):
-        try:
-            sio.connect(SOCKET_IO_URL)
-            sio.emit("join", {"username": self.username})
-        except Exception as e:
-            self.append_chat(f"Error connecting to chat server: {e}")
-
-        @sio.event
-        def connect():
-            self.append_chat("Connected to chat server.")
-
-        @sio.event
-        def disconnect():
-            self.append_chat("Disconnected from chat server.")
-
-        @sio.on("message")
-        def on_message(data):
-            username = data.get("username")
-            message = data.get("message")
-            self.append_chat(f"<b>{username}:</b> {message}")
-
-        @sio.on("user_joined")
-        def on_user_joined(data):
-            username = data.get("username")
-            self.append_chat(f"<i>{username} joined the chat.</i>")
-
-        @sio.on("user_left")
-        def on_user_left(data):
-            username = data.get("username")
-            self.append_chat(f"<i>{username} left the chat.</i>")
-
-        @sio.on("online_users")
-        def on_online_users(data):
-            self.online_users_list.clear()
-            for user in data:
-                self.online_users_list.addItem(user)
-
-    def append_chat(self, text):
-        self.chat_display.append(text)
-
-    def send_message(self):
-        message = self.message_edit.text().strip()
-        if message:
-            sio.emit("message", {"username": self.username, "message": message})
-            self.message_edit.clear()
-
-
-def main():
-    app = QApplication(sys.argv)
-    login = LoginWindow()
-    login.show()
-    sys.exit(app.exec_())
-
+def log_chat(username, message):
+    timestamp = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+    with open(CHAT_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{timestamp} {username}: {message}\n")
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host="0.0.0.0", port=port)
