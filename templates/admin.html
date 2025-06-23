@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Admin Terminal</title>
+  <style>
+    body {
+      background: #0d1117;
+      color: #c9d1d9;
+      font-family: monospace;
+      margin: 0;
+      padding: 20px;
+    }
+    h1 {
+      color: #58a6ff;
+    }
+    #terminal {
+      background: #161b22;
+      padding: 20px;
+      border-radius: 10px;
+      height: 70vh;
+      overflow-y: auto;
+      margin-bottom: 10px;
+      white-space: pre-wrap;
+    }
+    #cmd {
+      width: 80%;
+      padding: 10px;
+      font-size: 1em;
+      border: none;
+      border-radius: 5px;
+      background: #0d1117;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 1em;
+      margin-left: 10px;
+      background: #238636;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    button.clear-btn {
+      background: #da3633;
+    }
+  </style>
+</head>
+<body>
+  <h1>⚙️ Admin Terminal</h1>
+  <div id="terminal">💻 Admin Terminal Ready.\n</div>
+  <input type="text" id="cmd" placeholder="Enter command..." />
+  <button onclick="sendCmd()">Run</button>
+  <button class="clear-btn" onclick="clearTerminal()">Clear</button>
+
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script>
+    const socket = io('localhost:5000'); // Adjust the URL as needed
+    const terminal = document.getElementById("terminal");
+
+    function log(text) {
+      terminal.textContent += text + "\n";
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function sendCmd() {
+      const cmdInput = document.getElementById("cmd");
+      const command = cmdInput.value.trim();
+      if (command) {
+        log(`> ${command}`);
+        socket.emit('admin_command', command);
+        cmdInput.value = "";
+      }
+    }
+
+    function clearTerminal() {
+      terminal.textContent = "💻 Admin Terminal Ready.\n";
+    }
+
+    socket.on('cmd_result', (msg) => {
+      log(msg);
+    });
+
+    socket.on('connect', () => {
+      log("✅ Connected to server.");
+      socket.emit("get_maintenance_status");
+    });
+
+    socket.on("maintenance_status", (status) => {
+      log(`Server is currently ${status ? "🛠 UNDER MAINTENANCE" : "🟢 ONLINE"}`);
+    });
+  </script>
+</body>
+</html>
